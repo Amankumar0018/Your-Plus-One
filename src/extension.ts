@@ -59,7 +59,38 @@ export function activate(context: vscode.ExtensionContext): void {
         );
     });
 
-    context.subscriptions.push(outputChannel, viewDisposable, openWelcomeCommand, testConnectionCommand);
+    // Register the "Your +1: Run MCP Bridge Proof" command
+    const runMcpProofCommand = vscode.commands.registerCommand('yourplusone.runMcpProof', async () => {
+        outputChannel.show(true);
+
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+
+        await vscode.window.withProgress(
+            {
+                location: vscode.ProgressLocation.Notification,
+                title: 'Your +1: Verifying Read-only MCP Bridge...',
+                cancellable: false
+            },
+            async (progress) => {
+                progress.report({ message: 'Starting MCP server, registering with TrueForge, and running autonomous agent turn...' });
+                const service = new TrueForgeService();
+                const result = await service.testMcpBridge(workspaceFolder, outputChannel);
+
+                if (result.success) {
+                    const toolNames = result.toolCallsDetected.map((t) => t.tool).join(', ');
+                    void vscode.window.showInformationMessage(
+                        `Your +1: MCP Bridge verified! Model independently called [${toolNames}]. Answer: "${result.finalResponse?.slice(0, 80)}..."`
+                    );
+                } else {
+                    void vscode.window.showErrorMessage(
+                        `Your +1: MCP Bridge Verification Failed — ${result.error ?? 'Model did not call both search_workspace and read_file'}`
+                    );
+                }
+            }
+        );
+    });
+
+    context.subscriptions.push(outputChannel, viewDisposable, openWelcomeCommand, testConnectionCommand, runMcpProofCommand);
 }
 
 /**

@@ -2,7 +2,7 @@
 
 **Your +1** is an autonomous AI engineering companion for Visual Studio Code, designed to pair program with developers, provide architectural insights, and streamline coding workflows.
 
-This repository represents **Milestone 1: Foundation**, establishing the core extension scaffolding, native Activity Bar container, interactive sidebar welcome view, and command registration.
+This repository represents **Milestone 2: Read-only MCP Bridge**, establishing an embedded Model Context Protocol (MCP) server inside the Extension Host, exposing read-only workspace tools (`search_workspace` and `read_file`), and proving autonomous tool discovery and execution via the TrueForge agent runtime.
 
 ---
 
@@ -13,6 +13,10 @@ This repository represents **Milestone 1: Foundation**, establishing the core ex
 - **"Your +1: Open Welcome" Command**: Command palette entry (`yourplusone.openWelcome`) that reveals the sidebar view and displays a welcome notification.
 - **TrueForge SDK Integration**: Connects to a local TrueForge instance via the official TypeScript SDK (`@truefoundry/trueforge-sdk`).
 - **"Your +1: Test TrueForge Connection" Command**: Command palette entry (`yourplusone.testConnection`) and sidebar button that queries runtime models, creates a temporary session, streams a verification turn ("Reply with exactly: PONG") into a dedicated Output Channel, and cleans up the session.
+- **Embedded Read-only MCP Bridge**: Local Streamable HTTP MCP server running inside the Extension Host on loopback (`127.0.0.1`) with per-session bearer authentication exposing:
+  - `search_workspace`: Fast text query search across workspace files with directory exclusions and bounded results.
+  - `read_file`: Safe workspace-relative text reading with traversal protection, sensitive file rejection, binary file filtering, and size limit enforcement (<256 KB).
+- **"Your +1: Run MCP Bridge Proof" Command**: Command palette entry (`yourplusone.runMcpProof`) and sidebar button that registers the MCP server with TrueForge, attaches it to an inline agent session, directs the model to autonomously locate marker files and inspect contents, and cleans up all resources.
 - **Modular TypeScript Architecture**: Built with strict TypeScript compiler checks and fast esbuild bundling.
 
 ---
@@ -124,3 +128,15 @@ The extension contributes the following VS Code settings under `yourplusone.*`:
    - The dedicated **Your +1** Output Channel automatically opens in the bottom panel.
    - The channel logs the health probe, model discovery (`google-gemini/gemini-3-1-flash-lite`), temporary session creation, streaming PONG response, and temporary session deletion.
    - A success notification is shown: `Connected to TrueForge (model: ...). Response: "PONG"`.
+
+### 4. Test the "Your +1: Run MCP Bridge Proof" Command
+1. Ensure the TrueForge runtime is running locally with loopback outbound enabled (`OUTBOUND_URL_ALLOWED_HOSTS=["127.0.0.1","localhost"]`).
+2. In the Extension Development Host, click **Run MCP Bridge Proof** in the sidebar welcome view (or run `Your +1: Run MCP Bridge Proof` from the Command Palette).
+3. Observe:
+   - The embedded MCP server starts on a local loopback port with an ephemeral bearer token.
+   - The MCP server is dynamically registered in TrueForge under `yourplusone-tools`.
+   - TrueForge queries and discovers `search_workspace` and `read_file`.
+   - An agent turn is dispatched instructing the model to find the marker and read the file.
+   - The model calls `search_workspace` and `read_file` autonomously.
+   - The model streams its final answer: the verification secret from `resources/mcp-test-marker.txt`.
+   - All resources (TrueForge session, MCP server registration, local HTTP server) are cleaned up automatically.

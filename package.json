@@ -14,7 +14,8 @@
   "activationEvents": [
     "onView:yourplusone.welcomeView",
     "onCommand:yourplusone.openWelcome",
-    "onCommand:yourplusone.testConnection"
+    "onCommand:yourplusone.testConnection",
+    "onCommand:yourplusone.runMcpProof"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -45,6 +46,11 @@
       {
         "command": "yourplusone.testConnection",
         "title": "Test TrueForge Connection",
+        "category": "Your +1"
+      },
+      {
+        "command": "yourplusone.runMcpProof",
+        "title": "Run MCP Bridge Proof",
         "category": "Your +1"
       }
     ],
@@ -84,7 +90,9 @@
     "test": "vscode-test"
   },
   "dependencies": {
-    "@truefoundry/trueforge-sdk": "0.183.0"
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@truefoundry/trueforge-sdk": "0.183.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",

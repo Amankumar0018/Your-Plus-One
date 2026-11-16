@@ -32,6 +32,9 @@ export class WelcomeViewProvider implements vscode.WebviewViewProvider {
                 case 'triggerTestConnection':
                     void vscode.commands.executeCommand('yourplusone.testConnection');
                     break;
+                case 'triggerRunMcpProof':
+                    void vscode.commands.executeCommand('yourplusone.runMcpProof');
+                    break;
                 case 'showInfo':
                     if (message.text) {
                         void vscode.window.showInformationMessage(message.text);
@@ -247,12 +250,15 @@ export class WelcomeViewProvider implements vscode.WebviewViewProvider {
         <ul class="feature-list">
             <li>TrueForge SDK: <strong>@truefoundry/trueforge-sdk v0.183.0</strong></li>
             <li>Default Runtime URL: <strong>http://127.0.0.1:8790</strong></li>
-            <li>Stream Verification: <strong>Ready</strong></li>
+            <li>Embedded MCP Server: <strong>search_workspace, read_file</strong></li>
         </ul>
     </div>
 
     <div class="actions">
-        <button id="testConnectionBtn" class="primary">
+        <button id="runMcpProofBtn" class="primary">
+            <span>Run MCP Bridge Proof</span>
+        </button>
+        <button id="testConnectionBtn" class="secondary">
             <span>Test TrueForge Connection</span>
         </button>
         <button id="openWelcomeBtn" class="secondary">
@@ -264,11 +270,15 @@ export class WelcomeViewProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div class="footer">
-        <p>Your +1 Extension &bull; Milestone 1: TrueForge Connection</p>
+        <p>Your +1 Extension &bull; Milestone 2: Read-only MCP Bridge</p>
     </div>
 
     <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
+
+        document.getElementById('runMcpProofBtn').addEventListener('click', () => {
+            vscode.postMessage({ command: 'triggerRunMcpProof' });
+        });
 
         document.getElementById('testConnectionBtn').addEventListener('click', () => {
             vscode.postMessage({ command: 'triggerTestConnection' });
