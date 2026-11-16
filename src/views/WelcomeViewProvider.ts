@@ -1,14 +1,16 @@
 import * as vscode from 'vscode';
 import type { AssembledContextResult } from '../services/context/ContextTypes.js';
+import type { ModificationProposal } from '../services/diff/DiffTypes.js';
 
 /**
- * Webview provider for the Your +1 sidebar welcome & context selection view.
+ * Webview provider for the Your +1 sidebar welcome, context selection, and hunk-level diff review view.
  */
 export class WelcomeViewProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'yourplusone.welcomeView';
 
     private _view?: vscode.WebviewView;
     private _lastContextResult?: AssembledContextResult;
+    private _lastProposal?: ModificationProposal;
 
     constructor(private readonly _extensionUri: vscode.Uri) {}
 
@@ -26,7 +28,14 @@ export class WelcomeViewProvider implements vscode.WebviewViewProvider {
 
         webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
 
-        webviewView.webview.onDidReceiveMessage((message: { command: string; text?: string; prompt?: string }) => {
+        webviewView.webview.onDidReceiveMessage((message: {
+            command: string;
+            text?: string;
+            prompt?: string;
+            filePath?: string;
+            proposalId?: string;
+            hunkId?: string;
+        }) => {
             switch (message.command) {
                 case 'triggerWelcomeCommand':
                     void vscode.commands.executeCommand('yourplusone.openWelcome');
@@ -43,6 +52,51 @@ export class WelcomeViewProvider implements vscode.WebviewViewProvider {
                 case 'triggerRunContextTurn':
                     void vscode.commands.executeCommand('yourplusone.runTurnWithContext', message.prompt);
                     break;
+                case 'triggerOpenNativeDiff':
+                    if (message.filePath) {
+                        void vscode.commands.executeCommand('yourplusone.openNativeDiff', message.filePath, message.proposalId);
+                    }
+                    break;
+                case 'triggerAcceptHunk':
+                    if (message.proposalId && message.filePath && message.hunkId) {
+                        void vscode.commands.executeCommand('yourplusone.acceptHunk', {
+                            proposalId: message.proposalId,
+                            filePath: message.filePath,
+                            hunkId: message.hunkId
+                        });
+                    }
+                    break;
+                case 'triggerRejectHunk':
+                    if (message.proposalId && message.filePath && message.hunkId) {
+                        void vscode.commands.executeCommand('yourplusone.rejectHunk', {
+                            proposalId: message.proposalId,
+                            filePath: message.filePath,
+                            hunkId: message.hunkId
+                        });
+                    }
+                    break;
+                case 'triggerAcceptAllHunks':
+                    if (message.proposalId) {
+                        void vscode.commands.executeCommand('yourplusone.acceptAllHunks', {
+                            proposalId: message.proposalId,
+                            filePath: message.filePath
+                        });
+                    }
+                    break;
+                case 'triggerRejectAllHunks':
+                    if (message.proposalId) {
+                        void vscode.commands.executeCommand('yourplusone.rejectAllHunks', {
+                            proposalId: message.proposalId,
+                            filePath: message.filePath
+                        });
+                    }
+                    break;
+                case 'triggerApplyAcceptedHunks':
+                    void vscode.commands.executeCommand('yourplusone.applyAcceptedHunks', message.proposalId);
+                    break;
+                case 'triggerUndoLastTransaction':
+                    void vscode.commands.executeCommand('yourplusone.undoLastTransaction');
+                    break;
                 case 'showInfo':
                     if (message.text) {
                         void vscode.window.showInformationMessage(message.text);
@@ -55,6 +109,13 @@ export class WelcomeViewProvider implements vscode.WebviewViewProvider {
             void webviewView.webview.postMessage({
                 command: 'setContextResult',
                 data: this._lastContextResult
+            });
+        }
+
+        if (this._lastProposal) {
+            void webviewView.webview.postMessage({
+                command: 'setProposal',
+                data: this._lastProposal
             });
         }
     }
@@ -71,6 +132,16 @@ export class WelcomeViewProvider implements vscode.WebviewViewProvider {
             void this._view.webview.postMessage({
                 command: 'setContextResult',
                 data: result
+            });
+        }
+    }
+
+    public updateProposal(proposal: ModificationProposal): void {
+        this._lastProposal = proposal;
+        if (this._view) {
+            void this._view.webview.postMessage({
+                command: 'setProposal',
+                data: proposal
             });
         }
     }
@@ -157,7 +228,7 @@ export class WelcomeViewProvider implements vscode.WebviewViewProvider {
             margin-bottom: 6px;
             display: flex;
             align-items: center;
-            gap: 6px;
+            justify-content: space-between;
         }
 
         .form-group {
@@ -229,31 +300,23 @@ export class WelcomeViewProvider implements vscode.WebviewViewProvider {
             background-color: var(--vscode-button-secondaryHoverBackground, rgba(128, 128, 128, 0.25));
         }
 
-        /* Budget Meter */
-        .budget-bar-container {
-            width: 100%;
-            height: 8px;
-            background: rgba(128, 128, 128, 0.2);
-            border-radius: 4px;
-            overflow: hidden;
-            margin: 6px 0;
+        button.success {
+            background-color: #27ae60;
+            color: #ffffff;
         }
 
-        .budget-bar-fill {
-            height: 100%;
-            width: 0%;
-            background: var(--vscode-progressBar-background, #3794ff);
-            transition: width 0.3s ease;
+        button.danger {
+            background-color: #c0392b;
+            color: #ffffff;
         }
 
-        .budget-stats {
-            display: flex;
-            justify-content: space-between;
-            font-size: 11px;
-            color: var(--vscode-descriptionForeground);
-            margin-bottom: 4px;
+        button.small {
+            padding: 3px 6px;
+            font-size: 10px;
+            flex: none;
         }
 
+        /* Badges */
         .badge-pill {
             display: inline-block;
             padding: 2px 6px;
@@ -275,83 +338,77 @@ export class WelcomeViewProvider implements vscode.WebviewViewProvider {
             border: 1px solid rgba(100, 200, 100, 0.4);
         }
 
-        .badge-editor {
-            background: rgba(220, 150, 0, 0.2);
-            color: #e5a93c;
-            border: 1px solid rgba(220, 150, 0, 0.4);
-        }
-
-        .status-included {
+        .status-included, .status-accepted {
             color: #2ecc71;
             font-weight: 600;
         }
 
-        .status-truncated {
+        .status-truncated, .status-partially {
             color: #f1c40f;
             font-weight: 600;
         }
 
-        .status-omitted {
+        .status-omitted, .status-rejected, .status-conflict {
             color: #e74c3c;
             font-weight: 600;
         }
 
-        /* Candidates Table */
-        .candidate-card {
+        /* Diff Review Section */
+        .file-review-card {
             background: var(--vscode-editor-background);
             border: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.2));
             border-radius: 4px;
             padding: 8px;
             margin-bottom: 8px;
-            font-size: 11px;
         }
 
-        .candidate-header {
+        .file-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 4px;
-        }
-
-        .candidate-path {
             font-weight: 600;
-            color: var(--vscode-textLink-foreground);
+            font-size: 11px;
+            margin-bottom: 6px;
             word-break: break-all;
         }
 
-        .candidate-reason {
-            color: var(--vscode-descriptionForeground);
-            margin: 4px 0;
-            font-size: 11px;
-            line-height: 1.3;
-        }
-
-        .candidate-meta {
-            display: flex;
-            gap: 8px;
-            font-size: 10px;
-            color: var(--vscode-descriptionForeground);
-            margin-top: 4px;
-        }
-
-        .candidate-snippet {
-            display: none;
-            margin-top: 6px;
-            padding: 6px;
-            background: rgba(0, 0, 0, 0.2);
+        .hunk-card {
+            background: rgba(128, 128, 128, 0.05);
+            border: 1px solid rgba(128, 128, 128, 0.15);
             border-radius: 3px;
-            font-family: var(--vscode-editor-font-family, monospace);
+            padding: 6px;
+            margin-top: 6px;
             font-size: 10px;
+        }
+
+        .hunk-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-family: var(--vscode-editor-font-family, monospace);
+            font-weight: 600;
+            color: var(--vscode-textLink-foreground);
+        }
+
+        .hunk-diff-preview {
+            display: none;
+            margin-top: 4px;
+            padding: 4px;
+            background: rgba(0, 0, 0, 0.25);
+            border-radius: 2px;
+            font-family: var(--vscode-editor-font-family, monospace);
+            font-size: 9px;
             white-space: pre;
             overflow-x: auto;
-            max-height: 120px;
+            max-height: 100px;
         }
 
-        .toggle-snippet {
-            cursor: pointer;
-            text-decoration: underline;
-            color: var(--vscode-textLink-foreground);
-            font-size: 10px;
+        .diff-del {
+            color: #ff6b6b;
+        }
+
+        .diff-add {
+            color: #51cf66;
         }
 
         .alert-box {
@@ -369,7 +426,29 @@ export class WelcomeViewProvider implements vscode.WebviewViewProvider {
         <div class="logo-badge">+1</div>
         <div class="title-group">
             <h1 class="title">Your +1</h1>
-            <p class="subtitle">Intelligent Context Assembly Engine</p>
+            <p class="subtitle">Safe Workspace Editing &amp; Hunk Review</p>
+        </div>
+    </div>
+
+    <!-- Active Staged Proposal & Hunk Review (Milestone 4) -->
+    <div id="proposalSection" class="card" style="display: none;">
+        <div class="card-title">
+            <span>Hunk-Level Diff Review</span>
+            <span id="proposalIdBadge" class="badge-pill badge-explicit">No Proposal</span>
+        </div>
+        <p style="font-size: 11px; color: var(--vscode-descriptionForeground); margin: 4px 0 8px 0;">
+            Changes are staged in memory. Accept or reject individual hunks before confirming application.
+        </p>
+        
+        <div id="proposalFilesContainer"></div>
+
+        <div class="button-row" style="margin-top: 10px;">
+            <button id="applyProposalBtn" class="success">
+                <span>Confirm &amp; Apply Accepted Hunks</span>
+            </button>
+            <button id="undoTransactionBtn" class="secondary" title="Undo the last applied transaction">
+                <span>Undo Last Transaction</span>
+            </button>
         </div>
     </div>
 
@@ -377,8 +456,8 @@ export class WelcomeViewProvider implements vscode.WebviewViewProvider {
     <div class="card">
         <h2 class="card-title">Context Assembly (Milestone 3)</h2>
         <div class="form-group">
-            <label for="taskInput">Developer Task (use @file and @symbol):</label>
-            <textarea id="taskInput" placeholder="e.g. Check authentication logic in @file src/services/TrueForgeService.ts and review @symbol testMcpBridge">Inspect authentication and check @symbol testMcpBridge</textarea>
+            <label for="taskInput">Developer Task (supports @file and @symbol):</label>
+            <textarea id="taskInput" placeholder="e.g. Modify @file src/helpers.ts to add logging">Add helper function to @file src/helpers.ts</textarea>
         </div>
         <div class="button-row">
             <button id="assembleBtn" class="primary">
@@ -390,28 +469,7 @@ export class WelcomeViewProvider implements vscode.WebviewViewProvider {
         </div>
     </div>
 
-    <!-- Context Budget & Rationale View -->
-    <div id="contextSelectionContainer" class="card" style="display: none;">
-        <h2 class="card-title">Explainable Context Selection</h2>
-        
-        <div class="budget-stats">
-            <span id="budgetUsageLabel">Used: 0 / 16,000 tokens</span>
-            <span id="budgetRemainingLabel">16,000 left</span>
-        </div>
-        <div class="budget-bar-container">
-            <div id="budgetBarFill" class="budget-bar-fill"></div>
-        </div>
-        <div class="budget-stats" style="margin-top: 4px;">
-            <span id="budgetExplicitTokens">Explicit: 0 tokens</span>
-            <span id="budgetAutoTokens">Automatic: 0 tokens</span>
-        </div>
-
-        <div id="warningsAlert" class="alert-box" style="display: none;"></div>
-
-        <div id="candidatesList" style="margin-top: 10px;"></div>
-    </div>
-
-    <!-- System Actions -->
+    <!-- Quick Actions -->
     <div class="card">
         <h2 class="card-title">Quick Actions</h2>
         <div class="button-row" style="flex-direction: column;">
@@ -430,14 +488,13 @@ export class WelcomeViewProvider implements vscode.WebviewViewProvider {
         const taskInput = document.getElementById('taskInput');
         const assembleBtn = document.getElementById('assembleBtn');
         const runContextTurnBtn = document.getElementById('runContextTurnBtn');
-        const contextContainer = document.getElementById('contextSelectionContainer');
-        const budgetUsageLabel = document.getElementById('budgetUsageLabel');
-        const budgetRemainingLabel = document.getElementById('budgetRemainingLabel');
-        const budgetBarFill = document.getElementById('budgetBarFill');
-        const budgetExplicitTokens = document.getElementById('budgetExplicitTokens');
-        const budgetAutoTokens = document.getElementById('budgetAutoTokens');
-        const warningsAlert = document.getElementById('warningsAlert');
-        const candidatesList = document.getElementById('candidatesList');
+        const proposalSection = document.getElementById('proposalSection');
+        const proposalIdBadge = document.getElementById('proposalIdBadge');
+        const proposalFilesContainer = document.getElementById('proposalFilesContainer');
+        const applyProposalBtn = document.getElementById('applyProposalBtn');
+        const undoTransactionBtn = document.getElementById('undoTransactionBtn');
+
+        let currentActiveProposal = null;
 
         assembleBtn.addEventListener('click', () => {
             const prompt = taskInput.value.trim();
@@ -453,6 +510,16 @@ export class WelcomeViewProvider implements vscode.WebviewViewProvider {
             }
         });
 
+        applyProposalBtn.addEventListener('click', () => {
+            if (currentActiveProposal) {
+                vscode.postMessage({ command: 'triggerApplyAcceptedHunks', proposalId: currentActiveProposal.id });
+            }
+        });
+
+        undoTransactionBtn.addEventListener('click', () => {
+            vscode.postMessage({ command: 'triggerUndoLastTransaction' });
+        });
+
         document.getElementById('runMcpProofBtn').addEventListener('click', () => {
             vscode.postMessage({ command: 'triggerRunMcpProof' });
         });
@@ -461,77 +528,131 @@ export class WelcomeViewProvider implements vscode.WebviewViewProvider {
             vscode.postMessage({ command: 'triggerTestConnection' });
         });
 
-        // Listen for messages from extension host
         window.addEventListener('message', (event) => {
             const msg = event.data;
-            if (msg.command === 'setContextResult') {
-                renderContextResult(msg.data);
+            if (msg.command === 'setProposal') {
+                renderProposal(msg.data);
             }
         });
 
-        function renderContextResult(data) {
-            if (!data) return;
-            contextContainer.style.display = 'block';
-
-            const budget = data.budget;
-            const pct = Math.min(100, Math.round((budget.usedTokens / budget.maxContextAssemblyBudget) * 100));
-            budgetBarFill.style.width = pct + '%';
-            budgetUsageLabel.textContent = 'Used: ' + budget.usedTokens.toLocaleString() + ' / ' + budget.maxContextAssemblyBudget.toLocaleString() + ' tokens (' + pct + '%)';
-            budgetRemainingLabel.textContent = budget.remainingTokens.toLocaleString() + ' left';
-            budgetExplicitTokens.textContent = 'Explicit: ' + budget.explicitTokens.toLocaleString() + ' tokens';
-            budgetAutoTokens.textContent = 'Automatic: ' + budget.automaticTokens.toLocaleString() + ' tokens';
-
-            if (data.warnings && data.warnings.length > 0) {
-                warningsAlert.style.display = 'block';
-                warningsAlert.innerHTML = '<strong>Warnings:</strong><br>' + data.warnings.map(w => '&bull; ' + escapeHtml(w)).join('<br>');
-            } else {
-                warningsAlert.style.display = 'none';
-            }
-
-            candidatesList.innerHTML = '';
-            if (!data.candidates || data.candidates.length === 0) {
-                candidatesList.innerHTML = '<p style="color: var(--vscode-descriptionForeground); font-size: 11px;">No relevant context candidates found.</p>';
+        function renderProposal(proposal) {
+            currentActiveProposal = proposal;
+            if (!proposal || !proposal.files || proposal.files.length === 0) {
+                proposalSection.style.display = 'none';
                 return;
             }
 
-            data.candidates.forEach((c, idx) => {
-                const card = document.createElement('div');
-                card.className = 'candidate-card';
+            proposalSection.style.display = 'block';
+            proposalIdBadge.textContent = proposal.id;
 
-                let sourceBadge = '<span class="badge-pill badge-auto">Automatic</span>';
-                if (c.source === 'explicit_file') sourceBadge = '<span class="badge-pill badge-explicit">@file</span>';
-                if (c.source === 'explicit_symbol') sourceBadge = '<span class="badge-pill badge-explicit">@symbol</span>';
-                if (c.source === 'automatic_active_editor') sourceBadge = '<span class="badge-pill badge-editor">Editor</span>';
+            proposalFilesContainer.innerHTML = '';
 
-                let statusHtml = '<span class="status-included">Included</span>';
-                if (c.status === 'truncated') statusHtml = '<span class="status-truncated">Truncated</span>';
-                if (c.status === 'omitted_budget') statusHtml = '<span class="status-omitted">Omitted</span>';
+            proposal.files.forEach((file) => {
+                const fileCard = document.createElement('div');
+                fileCard.className = 'file-review-card';
 
-                const snippetId = 'snippet-' + idx;
-                const toggleId = 'toggle-' + idx;
+                const totalHunks = file.hunks ? file.hunks.length : 0;
+                const acceptedHunks = file.hunks ? file.hunks.filter(h => h.status === 'accepted').length : 0;
+                const rejectedHunks = file.hunks ? file.hunks.filter(h => h.status === 'rejected').length : 0;
 
-                card.innerHTML = 
-                    '<div class="candidate-header">' +
-                        '<span class="candidate-path">' + escapeHtml(c.filePath) + (c.symbolName ? ' (' + escapeHtml(c.symbolName) + ')' : '') + '</span>' +
-                        '<div>' + sourceBadge + ' ' + statusHtml + '</div>' +
+                let statusBadge = '<span class="status-truncated">' + file.status + '</span>';
+                if (file.status === 'accepted') statusBadge = '<span class="status-accepted">All Accepted</span>';
+                if (file.status === 'rejected') statusBadge = '<span class="status-rejected">All Rejected</span>';
+                if (file.status === 'conflict') statusBadge = '<span class="status-conflict">Conflict Detected</span>';
+
+                fileCard.innerHTML = 
+                    '<div class="file-header">' +
+                        '<span>' + escapeHtml(file.filePath) + '</span>' +
+                        '<span>' + statusBadge + '</span>' +
                     '</div>' +
-                    '<div class="candidate-reason">' + escapeHtml(c.selectionReason) + '</div>' +
-                    '<div class="candidate-meta">' +
-                        '<span>Lines: ' + c.startLine + '-' + c.endLine + '</span>' +
-                        '<span>Tokens: ~' + c.estimatedTokens + '</span>' +
-                        (c.relevanceScore ? '<span>Score: ' + c.relevanceScore + '</span>' : '') +
-                        '<span id="' + toggleId + '" class="toggle-snippet">View Excerpt</span>' +
-                    '</div>' +
-                    '<div id="' + snippetId + '" class="candidate-snippet">' + escapeHtml(c.content) + '</div>';
+                    '<div class="button-row" style="margin-bottom: 8px;">' +
+                        '<button class="secondary small diff-btn" data-path="' + escapeHtml(file.filePath) + '">Open Native Diff</button>' +
+                        '<button class="secondary small accept-all-btn" data-path="' + escapeHtml(file.filePath) + '">Accept All (' + totalHunks + ')</button>' +
+                        '<button class="secondary small reject-all-btn" data-path="' + escapeHtml(file.filePath) + '">Reject All</button>' +
+                    '</div>';
 
-                candidatesList.appendChild(card);
+                // Render each hunk
+                if (file.hunks && file.hunks.length > 0) {
+                    file.hunks.forEach((hunk) => {
+                        const hunkEl = document.createElement('div');
+                        hunkEl.className = 'hunk-card';
 
-                const toggleEl = card.querySelector('#' + toggleId);
-                const snippetEl = card.querySelector('#' + snippetId);
-                toggleEl.addEventListener('click', () => {
-                    const isVisible = snippetEl.style.display === 'block';
-                    snippetEl.style.display = isVisible ? 'none' : 'block';
-                    toggleEl.textContent = isVisible ? 'View Excerpt' : 'Hide Excerpt';
+                        let hunkStatusHtml = '<span style="color: #f1c40f;">Pending</span>';
+                        if (hunk.status === 'accepted') hunkStatusHtml = '<span class="status-accepted">✓ Accepted</span>';
+                        if (hunk.status === 'rejected') hunkStatusHtml = '<span class="status-rejected">✗ Rejected</span>';
+
+                        const hunkPreviewId = 'preview-' + hunk.id;
+
+                        let previewLines = '';
+                        (hunk.originalLines || []).forEach(l => { previewLines += '<div class="diff-del">-' + escapeHtml(l) + '</div>'; });
+                        (hunk.proposedLines || []).forEach(l => { previewLines += '<div class="diff-add">+' + escapeHtml(l) + '</div>'; });
+
+                        hunkEl.innerHTML = 
+                            '<div class="hunk-header">' +
+                                '<span>' + escapeHtml(hunk.header) + '</span>' +
+                                '<span>' + hunkStatusHtml + '</span>' +
+                            '</div>' +
+                            '<div class="button-row" style="margin-top: 4px;">' +
+                                '<button class="small ' + (hunk.status === 'accepted' ? 'primary' : 'secondary') + ' accept-hunk-btn" data-file="' + escapeHtml(file.filePath) + '" data-hunk="' + hunk.id + '">Accept</button>' +
+                                '<button class="small ' + (hunk.status === 'rejected' ? 'danger' : 'secondary') + ' reject-hunk-btn" data-file="' + escapeHtml(file.filePath) + '" data-hunk="' + hunk.id + '">Reject</button>' +
+                                '<button class="small secondary toggle-hunk-preview" data-target="' + hunkPreviewId + '">Inspect</button>' +
+                            '</div>' +
+                            '<div id="' + hunkPreviewId + '" class="hunk-diff-preview">' + previewLines + '</div>';
+
+                        fileCard.appendChild(hunkEl);
+                    });
+                }
+
+                proposalFilesContainer.appendChild(fileCard);
+            });
+
+            // Wire event listeners
+            proposalFilesContainer.querySelectorAll('.diff-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const filePath = btn.getAttribute('data-path');
+                    vscode.postMessage({ command: 'triggerOpenNativeDiff', filePath, proposalId: proposal.id });
+                });
+            });
+
+            proposalFilesContainer.querySelectorAll('.accept-all-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const filePath = btn.getAttribute('data-path');
+                    vscode.postMessage({ command: 'triggerAcceptAllHunks', filePath, proposalId: proposal.id });
+                });
+            });
+
+            proposalFilesContainer.querySelectorAll('.reject-all-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const filePath = btn.getAttribute('data-path');
+                    vscode.postMessage({ command: 'triggerRejectAllHunks', filePath, proposalId: proposal.id });
+                });
+            });
+
+            proposalFilesContainer.querySelectorAll('.accept-hunk-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const filePath = btn.getAttribute('data-file');
+                    const hunkId = btn.getAttribute('data-hunk');
+                    vscode.postMessage({ command: 'triggerAcceptHunk', filePath, hunkId, proposalId: proposal.id });
+                });
+            });
+
+            proposalFilesContainer.querySelectorAll('.reject-hunk-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const filePath = btn.getAttribute('data-file');
+                    const hunkId = btn.getAttribute('data-hunk');
+                    vscode.postMessage({ command: 'triggerRejectHunk', filePath, hunkId, proposalId: proposal.id });
+                });
+            });
+
+            proposalFilesContainer.querySelectorAll('.toggle-hunk-preview').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const targetId = btn.getAttribute('data-target');
+                    const previewEl = document.getElementById(targetId);
+                    if (previewEl) {
+                        const isVisible = previewEl.style.display === 'block';
+                        previewEl.style.display = isVisible ? 'none' : 'block';
+                        btn.textContent = isVisible ? 'Inspect' : 'Close';
+                    }
                 });
             });
         }

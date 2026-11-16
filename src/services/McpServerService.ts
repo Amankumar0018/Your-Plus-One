@@ -6,6 +6,8 @@ import type { Socket } from 'node:net';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
+import { ProposalStore } from './diff/ProposalStore.js';
+import type { ModificationProposal } from './diff/DiffTypes.js';
 
 export interface McpServerConfig {
     workspaceRoot: string;
@@ -14,6 +16,8 @@ export interface McpServerConfig {
     authToken?: string;
     maxFileSize?: number;
     logger?: (message: string) => void;
+    proposalStore?: ProposalStore;
+    onProposalCreated?: (proposal: ModificationProposal) => void;
 }
 
 export interface McpServerInfo {
@@ -74,6 +78,8 @@ export class McpServerService {
     private readonly _authToken: string;
     private readonly _maxFileSize: number;
     private readonly _logger?: (message: string) => void;
+    private readonly _proposalStore: ProposalStore;
+    private readonly _onProposalCreated?: (proposal: ModificationProposal) => void;
 
     private _httpServer: http.Server | undefined;
     private readonly _sessions = new Map<string, StreamableHTTPServerTransport>();
@@ -88,6 +94,12 @@ export class McpServerService {
         this._authToken = config.authToken ?? crypto.randomBytes(32).toString('hex');
         this._maxFileSize = config.maxFileSize ?? DEFAULT_MAX_FILE_SIZE;
         this._logger = config.logger;
+        this._proposalStore = config.proposalStore ?? new ProposalStore(this._workspaceRoot);
+        this._onProposalCreated = config.onProposalCreated;
+    }
+
+    public get proposalStore(): ProposalStore {
+        return this._proposalStore;
     }
 
     public get authToken(): string {
@@ -310,6 +322,100 @@ export class McpServerService {
                     return {
                         isError: true,
                         content: [{ type: 'text', text: `Error reading file: ${errorMsg}` }]
+                    };
+                }
+            }
+        );
+
+        // Tool 3: propose_file_modification (stages proposed changes without writing to disk)
+        server.tool(
+            'propose_file_modification',
+            'Propose modifications to one or more workspace text files. Changes are staged in memory for hunk-level developer review. NO changes are written to disk until explicitly reviewed and approved.',
+            {
+                proposalId: z.string().optional().describe('Optional custom proposal identifier'),
+                files: z.array(z.object({
+                    path: z.string().describe('Workspace-relative path to the file to modify'),
+                    proposedContent: z.string().describe('Complete proposed new content for this file'),
+                    rationale: z.string().optional().describe('Rationale explaining the proposed modifications')
+                })).describe('Array of file modifications to stage for review')
+            },
+            async ({ proposalId, files }) => {
+                this._recordToolCall('propose_file_modification', { proposalId, filesCount: files.length });
+                try {
+                    const proposal = this._proposalStore.createProposal(files, proposalId);
+                    this._log(`Proposal ${proposal.id} staged successfully with ${proposal.files.length} file(s).`);
+
+                    if (this._onProposalCreated) {
+                        try {
+                            this._onProposalCreated(proposal);
+                        } catch {
+                            // ignore callback errors
+                        }
+                    }
+
+                    const summary = proposal.files.map((f) => ({
+                        path: f.filePath,
+                        hunkCount: f.hunks.length,
+                        status: f.status
+                    }));
+
+                    return {
+                        content: [{
+                            type: 'text',
+                            text: JSON.stringify({
+                                status: 'staged_for_review',
+                                proposalId: proposal.id,
+                                files: summary,
+                                message: 'Modifications staged successfully in memory. Developer will review individual hunks before application.'
+                            }, null, 2)
+                        }]
+                    };
+                } catch (err: unknown) {
+                    const errorMsg = err instanceof Error ? err.message : String(err);
+                    return {
+                        isError: true,
+                        content: [{ type: 'text', text: `Error creating proposal: ${errorMsg}` }]
+                    };
+                }
+            }
+        );
+
+        // Tool 4: apply_proposal (requires explicit TrueForge approval before execution)
+        server.tool(
+            'apply_proposal',
+            'Apply previously staged and developer-approved hunk modifications to workspace files. Requires human approval before execution.',
+            {
+                proposalId: z.string().describe('Unique identifier of the staged proposal to apply')
+            },
+            async ({ proposalId }) => {
+                this._recordToolCall('apply_proposal', { proposalId });
+                try {
+                    const tx = await this._proposalStore.applyProposal(proposalId);
+                    this._log(`Proposal ${proposalId} applied successfully. Transaction ID: ${tx.id}.`);
+
+                    const summary = tx.modifiedFiles.map((m) => ({
+                        path: m.filePath,
+                        appliedHunks: m.appliedHunkCount,
+                        rejectedHunks: m.rejectedHunkCount
+                    }));
+
+                    return {
+                        content: [{
+                            type: 'text',
+                            text: JSON.stringify({
+                                status: 'applied',
+                                transactionId: tx.id,
+                                proposalId,
+                                modifiedFiles: summary,
+                                message: 'Accepted hunks applied cleanly to workspace. Unaccepted hunks were preserved unchanged.'
+                            }, null, 2)
+                        }]
+                    };
+                } catch (err: unknown) {
+                    const errorMsg = err instanceof Error ? err.message : String(err);
+                    return {
+                        isError: true,
+                        content: [{ type: 'text', text: `Error applying proposal: ${errorMsg}` }]
                     };
                 }
             }

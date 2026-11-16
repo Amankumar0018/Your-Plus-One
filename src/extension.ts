@@ -1,8 +1,11 @@
 import * as vscode from 'vscode';
+import * as path from 'node:path';
 import { WelcomeViewProvider } from './views/WelcomeViewProvider.js';
 import { TrueForgeService } from './services/TrueForgeService.js';
 import { ContextAssemblyEngine } from './services/context/ContextAssemblyEngine.js';
 import type { ActiveEditorContext } from './services/context/ContextTypes.js';
+import { ProposalStore } from './services/diff/ProposalStore.js';
+import { StagedContentProvider } from './services/diff/StagedContentProvider.js';
 
 /**
  * Activates the Your +1 extension.
@@ -15,7 +18,18 @@ export function activate(context: vscode.ExtensionContext): void {
     // Create persistent Output Channel for Your +1 logging and streaming
     const outputChannel = vscode.window.createOutputChannel('Your +1');
 
-    // Register sidebar webview provider for the Your +1 activity bar container
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+
+    // 1. Initialize safe diff and staging subsystems
+    const proposalStore = new ProposalStore(workspaceFolder);
+    const stagedContentProvider = new StagedContentProvider(proposalStore, workspaceFolder);
+
+    const providerRegistration = vscode.workspace.registerTextDocumentContentProvider(
+        StagedContentProvider.scheme,
+        stagedContentProvider
+    );
+
+    // 2. Register sidebar webview provider for the Your +1 activity bar container
     const welcomeViewProvider = new WelcomeViewProvider(context.extensionUri);
     const viewDisposable = vscode.window.registerWebviewViewProvider(
         WelcomeViewProvider.viewType,
@@ -64,8 +78,6 @@ export function activate(context: vscode.ExtensionContext): void {
     // Register the "Your +1: Run MCP Bridge Proof" command
     const runMcpProofCommand = vscode.commands.registerCommand('yourplusone.runMcpProof', async () => {
         outputChannel.show(true);
-
-        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
 
         await vscode.window.withProgress(
             {
@@ -128,7 +140,6 @@ export function activate(context: vscode.ExtensionContext): void {
         outputChannel.appendLine(`\n========================================================`);
         outputChannel.appendLine(`[Your +1 Context Assembly] Assembling context for task: "${taskPrompt}"`);
 
-        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
         const config = vscode.workspace.getConfiguration('yourplusone');
         const maxBudget = config.get<number>('maxContextBudgetTokens', 16000);
 
@@ -165,13 +176,176 @@ export function activate(context: vscode.ExtensionContext): void {
         return result;
     });
 
+    // Register Native Diff Preview command
+    const openNativeDiffCommand = vscode.commands.registerCommand(
+        'yourplusone.openNativeDiff',
+        async (filePath: string, proposalId?: string) => {
+            const targetPropId = proposalId ?? proposalStore.activeProposal?.id;
+            if (!targetPropId) {
+                void vscode.window.showErrorMessage('Your +1: No active proposal available for diff review.');
+                return;
+            }
+
+            try {
+                await stagedContentProvider.openNativeDiff(targetPropId, filePath);
+            } catch (err: unknown) {
+                const msg = err instanceof Error ? err.message : String(err);
+                void vscode.window.showErrorMessage(`Your +1: Failed to open diff: ${msg}`);
+            }
+        }
+    );
+
+    // Register Accept Hunk command
+    const acceptHunkCommand = vscode.commands.registerCommand(
+        'yourplusone.acceptHunk',
+        ({ proposalId, filePath, hunkId }: { proposalId: string; filePath: string; hunkId: string }) => {
+            try {
+                proposalStore.setHunkDecision(proposalId, filePath, hunkId, 'accepted');
+                stagedContentProvider.notifyDocumentChanged(proposalId, filePath);
+                const prop = proposalStore.getProposal(proposalId);
+                if (prop) {
+                    welcomeViewProvider.updateProposal(prop);
+                }
+            } catch (err: unknown) {
+                const msg = err instanceof Error ? err.message : String(err);
+                void vscode.window.showErrorMessage(`Error accepting hunk: ${msg}`);
+            }
+        }
+    );
+
+    // Register Reject Hunk command
+    const rejectHunkCommand = vscode.commands.registerCommand(
+        'yourplusone.rejectHunk',
+        ({ proposalId, filePath, hunkId }: { proposalId: string; filePath: string; hunkId: string }) => {
+            try {
+                proposalStore.setHunkDecision(proposalId, filePath, hunkId, 'rejected');
+                stagedContentProvider.notifyDocumentChanged(proposalId, filePath);
+                const prop = proposalStore.getProposal(proposalId);
+                if (prop) {
+                    welcomeViewProvider.updateProposal(prop);
+                }
+            } catch (err: unknown) {
+                const msg = err instanceof Error ? err.message : String(err);
+                void vscode.window.showErrorMessage(`Error rejecting hunk: ${msg}`);
+            }
+        }
+    );
+
+    // Register Accept All Hunks command
+    const acceptAllHunksCommand = vscode.commands.registerCommand(
+        'yourplusone.acceptAllHunks',
+        ({ proposalId, filePath }: { proposalId: string; filePath?: string }) => {
+            try {
+                proposalStore.setAllHunksDecision(proposalId, 'accepted', filePath);
+                if (filePath) {
+                    stagedContentProvider.notifyDocumentChanged(proposalId, filePath);
+                }
+                const prop = proposalStore.getProposal(proposalId);
+                if (prop) {
+                    welcomeViewProvider.updateProposal(prop);
+                }
+            } catch (err: unknown) {
+                const msg = err instanceof Error ? err.message : String(err);
+                void vscode.window.showErrorMessage(`Error accepting hunks: ${msg}`);
+            }
+        }
+    );
+
+    // Register Reject All Hunks command
+    const rejectAllHunksCommand = vscode.commands.registerCommand(
+        'yourplusone.rejectAllHunks',
+        ({ proposalId, filePath }: { proposalId: string; filePath?: string }) => {
+            try {
+                proposalStore.setAllHunksDecision(proposalId, 'rejected', filePath);
+                if (filePath) {
+                    stagedContentProvider.notifyDocumentChanged(proposalId, filePath);
+                }
+                const prop = proposalStore.getProposal(proposalId);
+                if (prop) {
+                    welcomeViewProvider.updateProposal(prop);
+                }
+            } catch (err: unknown) {
+                const msg = err instanceof Error ? err.message : String(err);
+                void vscode.window.showErrorMessage(`Error rejecting hunks: ${msg}`);
+            }
+        }
+    );
+
+    // Helper for applying changes using native VS Code WorkspaceEdit
+    const applyWorkspaceEditSafely = async (relPath: string, content: string): Promise<void> => {
+        const fullUri = vscode.Uri.file(path.resolve(workspaceFolder, relPath));
+        const edit = new vscode.WorkspaceEdit();
+
+        // Read full document range if open
+        const doc = await vscode.workspace.openTextDocument(fullUri);
+        const fullRange = new vscode.Range(
+            doc.positionAt(0),
+            doc.positionAt(doc.getText().length)
+        );
+
+        edit.replace(fullUri, fullRange, content);
+        const applied = await vscode.workspace.applyEdit(edit);
+        if (!applied) {
+            throw new Error(`Failed to apply WorkspaceEdit to ${relPath}`);
+        }
+        await doc.save();
+    };
+
+    // Register Apply Accepted Hunks command
+    const applyAcceptedHunksCommand = vscode.commands.registerCommand(
+        'yourplusone.applyAcceptedHunks',
+        async (proposalIdArg?: string) => {
+            const proposalId = proposalIdArg ?? proposalStore.activeProposal?.id;
+            if (!proposalId) {
+                void vscode.window.showErrorMessage('Your +1: No active proposal to apply.');
+                return;
+            }
+
+            try {
+                const tx = await proposalStore.applyProposal(proposalId, applyWorkspaceEditSafely);
+                const prop = proposalStore.getProposal(proposalId);
+                if (prop) {
+                    welcomeViewProvider.updateProposal(prop);
+                }
+
+                const totalHunks = tx.modifiedFiles.reduce((sum, f) => sum + f.appliedHunkCount, 0);
+                void vscode.window.showInformationMessage(
+                    `Your +1: Successfully applied ${totalHunks} accepted hunk(s) across ${tx.modifiedFiles.length} file(s). Transaction: ${tx.id}`
+                );
+            } catch (err: unknown) {
+                const msg = err instanceof Error ? err.message : String(err);
+                void vscode.window.showErrorMessage(`Your +1: Failed to apply proposal: ${msg}`);
+            }
+        }
+    );
+
+    // Register Undo Last Transaction command
+    const undoLastTransactionCommand = vscode.commands.registerCommand(
+        'yourplusone.undoLastTransaction',
+        async () => {
+            try {
+                const result = await proposalStore.undoTransaction(undefined, applyWorkspaceEditSafely);
+                if (proposalStore.activeProposal) {
+                    welcomeViewProvider.updateProposal(proposalStore.activeProposal);
+                }
+
+                void vscode.window.showInformationMessage(
+                    `Your +1: Undid last transaction. Restored ${result.undoneFiles.length} file(s) to previous state.`
+                );
+            } catch (err: unknown) {
+                const msg = err instanceof Error ? err.message : String(err);
+                void vscode.window.showErrorMessage(`Your +1: Undo failed: ${msg}`);
+            }
+        }
+    );
+
     // Register the "Your +1: Run Agent Turn with Context" command
     const runTurnWithContextCommand = vscode.commands.registerCommand('yourplusone.runTurnWithContext', async (promptArg?: string) => {
         let taskPrompt = promptArg;
         if (!taskPrompt) {
             taskPrompt = await vscode.window.showInputBox({
-                prompt: 'Enter task instruction to execute with assembled context',
-                placeHolder: 'e.g. Check authentication logic in @file src/services/TrueForgeService.ts and review @symbol testMcpBridge'
+                prompt: 'Enter task instruction to execute with assembled context and safe review',
+                placeHolder: 'e.g. Modify @file src/helpers.ts to add logging function'
             });
         }
 
@@ -181,7 +355,6 @@ export function activate(context: vscode.ExtensionContext): void {
 
         outputChannel.show(true);
 
-        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
         const config = vscode.workspace.getConfiguration('yourplusone');
         const maxBudget = config.get<number>('maxContextBudgetTokens', 16000);
 
@@ -206,7 +379,31 @@ export function activate(context: vscode.ExtensionContext): void {
 
                 progress.report({ message: 'Step 2/2: Dispatching turn to TrueForge...' });
                 const service = new TrueForgeService();
-                const result = await service.runTurnWithContext(workspaceFolder, assembled, outputChannel);
+
+                const result = await service.runTurnWithContext(workspaceFolder, assembled, outputChannel, {
+                    proposalStore,
+                    approvalHandler: async (req) => {
+                        const activeProp = proposalStore.activeProposal;
+                        if (activeProp) {
+                            welcomeViewProvider.updateProposal(activeProp);
+                            welcomeViewProvider.focus();
+                        }
+
+                        const choice = await vscode.window.showInformationMessage(
+                            `Your +1: TrueForge has proposed changes awaiting approval for ${req.toolCalls.length} action(s). Review hunks in the sidebar or diff editor.`,
+                            { modal: true },
+                            'Allow & Apply Accepted Hunks',
+                            'Reject Proposal'
+                        );
+
+                        return choice === 'Allow & Apply Accepted Hunks' ? 'allow' : 'deny';
+                    }
+                });
+
+                if (result.proposal) {
+                    welcomeViewProvider.updateProposal(result.proposal);
+                    welcomeViewProvider.focus();
+                }
 
                 if (result.success) {
                     void vscode.window.showInformationMessage(
@@ -223,12 +420,20 @@ export function activate(context: vscode.ExtensionContext): void {
 
     context.subscriptions.push(
         outputChannel,
+        providerRegistration,
         viewDisposable,
         openWelcomeCommand,
         testConnectionCommand,
         runMcpProofCommand,
         assembleContextCommand,
-        runTurnWithContextCommand
+        runTurnWithContextCommand,
+        openNativeDiffCommand,
+        acceptHunkCommand,
+        rejectHunkCommand,
+        acceptAllHunksCommand,
+        rejectAllHunksCommand,
+        applyAcceptedHunksCommand,
+        undoLastTransactionCommand
     );
 }
 

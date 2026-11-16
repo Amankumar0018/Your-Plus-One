@@ -17,7 +17,10 @@
     "onCommand:yourplusone.testConnection",
     "onCommand:yourplusone.runMcpProof",
     "onCommand:yourplusone.assembleContext",
-    "onCommand:yourplusone.runTurnWithContext"
+    "onCommand:yourplusone.runTurnWithContext",
+    "onCommand:yourplusone.openNativeDiff",
+    "onCommand:yourplusone.applyAcceptedHunks",
+    "onCommand:yourplusone.undoLastTransaction"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -63,6 +66,21 @@
       {
         "command": "yourplusone.runTurnWithContext",
         "title": "Run Agent Turn with Context",
+        "category": "Your +1"
+      },
+      {
+        "command": "yourplusone.openNativeDiff",
+        "title": "Open Native Diff Preview",
+        "category": "Your +1"
+      },
+      {
+        "command": "yourplusone.applyAcceptedHunks",
+        "title": "Apply Accepted Changes",
+        "category": "Your +1"
+      },
+      {
+        "command": "yourplusone.undoLastTransaction",
+        "title": "Undo Last Applied Changes",
         "category": "Your +1"
       }
     ],

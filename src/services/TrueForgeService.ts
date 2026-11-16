@@ -17,6 +17,9 @@ export interface TestConnectionResult {
     error?: string;
 }
 
+import type { ProposalStore } from './diff/ProposalStore.js';
+import type { ModificationProposal } from './diff/DiffTypes.js';
+
 export interface TestMcpBridgeResult {
     success: boolean;
     model?: string;
@@ -28,12 +31,25 @@ export interface TestMcpBridgeResult {
     error?: string;
 }
 
+export interface RunContextTurnOptions {
+    proposalStore?: ProposalStore;
+    approvalHandler?: (req: {
+        sessionId: string;
+        turnId: string;
+        threadId?: string;
+        toolCalls: Array<{ id: string; sourceEventId?: string }>;
+    }) => Promise<'allow' | 'deny'>;
+}
+
 export interface RunContextTurnResult {
     success: boolean;
     model?: string;
     finalResponse?: string;
     sessionId?: string;
     toolCallsDetected: Array<{ tool: string; arguments: Record<string, unknown> }>;
+    proposal?: ModificationProposal;
+    approvalRequested?: boolean;
+    approvalDecision?: 'allow' | 'deny';
     error?: string;
 }
 
@@ -473,12 +489,14 @@ export class TrueForgeService {
     }
 
     /**
-     * Executes a TrueForge agent turn equipped with assembled workspace context and active MCP tools.
+     * Executes a TrueForge agent turn equipped with assembled workspace context, active MCP tools,
+     * and safe human-in-the-loop tool approval gating.
      */
     public async runTurnWithContext(
         workspaceRoot: string,
         assembledContext: AssembledContextResult,
-        outputChannel: vscode.OutputChannel
+        outputChannel: vscode.OutputChannel,
+        options?: RunContextTurnOptions
     ): Promise<RunContextTurnResult> {
         outputChannel.appendLine(`========================================================`);
         outputChannel.appendLine(`[Your +1] Dispatching Agent Turn with Assembled Context`);
@@ -504,9 +522,14 @@ export class TrueForgeService {
         const mcpServerName = 'yourplusone-tools';
         let createdSessionId: string | undefined;
         let mcpRegistered = false;
+        let currentTurnId: string | undefined;
+        let currentThreadId: string | undefined;
+        let approvalRequested = false;
+        let approvalDecision: 'allow' | 'deny' | undefined;
 
         const mcpService = new McpServerService({
             workspaceRoot,
+            proposalStore: options?.proposalStore,
             logger: (msg) => outputChannel.appendLine(`[MCP Log] ${msg}`)
         });
 
@@ -519,7 +542,7 @@ export class TrueForgeService {
                     type: 'remote',
                     name: mcpServerName,
                     url: serverInfo.url,
-                    description: 'Your +1 workspace tools (search_workspace, read_file)',
+                    description: 'Your +1 workspace tools (search_workspace, read_file, propose_file_modification, apply_proposal)',
                     auth: {
                         type: 'header',
                         headers: {
@@ -539,19 +562,19 @@ export class TrueForgeService {
             }
             outputChannel.appendLine(`[Your +1] Model selected: ${selectedModel}`);
 
-            // Create agent session with assembled context instructions and MCP tools attached
+            // Create agent session with attached tools and require_approval_for_tools on apply_proposal
             const sessionRes = await client.sessions.create({
                 agent: {
                     spec: {
                         model: { name: selectedModel },
-                        instructions: 'You are Your +1, an AI engineering companion. You are provided with assembled workspace context containing explicit file references and relevant excerpts. Use this context carefully. You also have access to search_workspace and read_file tools if you need to inspect additional files or verify details.',
+                        instructions: 'You are Your +1, an AI engineering companion. You are provided with assembled workspace context containing explicit file references and relevant excerpts. When code modifications are requested, you MUST use the propose_file_modification tool to stage changes for human review. Once staged, request apply_proposal. Never attempt direct unreviewed writes.',
                         mcp_servers: [
                             {
                                 name: mcpServerName,
-                                enable_tools: ['search_workspace', 'read_file'],
+                                enable_tools: ['search_workspace', 'read_file', 'propose_file_modification', 'apply_proposal'],
                                 preload: true,
-                                preload_tools: ['search_workspace', 'read_file'],
-                                require_approval_for_tools: []
+                                preload_tools: ['search_workspace', 'read_file', 'propose_file_modification', 'apply_proposal'],
+                                require_approval_for_tools: ['apply_proposal']
                             }
                         ]
                     }
@@ -580,12 +603,50 @@ export class TrueForgeService {
 
             let fullContent = '';
             for await (const event of stream) {
-                if (event.type === 'model.message.delta' && event.content) {
+                if (event.type === 'turn.created') {
+                    currentTurnId = event.turnId;
+                    if (event.threadId) {
+                        currentThreadId = event.threadId;
+                    }
+                } else if (event.type === 'model.message.delta' && event.content) {
                     fullContent += event.content;
                     outputChannel.append(event.content);
                 } else if (event.type === 'model.message' && event.toolCalls && event.toolCalls.length > 0) {
                     for (const tc of event.toolCalls) {
                         outputChannel.appendLine(`\n[Agent Event] Model requested tool "${tc.name}" with arguments: ${JSON.stringify(tc.arguments)}`);
+                    }
+                } else if (event.type === 'tool.approval_required') {
+                    approvalRequested = true;
+                    outputChannel.appendLine(`\n[Your +1 Approval Gate] Tool approval required by TrueForge for ${event.toolCalls.length} tool call(s).`);
+
+                    let decision: 'allow' | 'deny' = 'deny';
+                    if (options?.approvalHandler && currentTurnId) {
+                        decision = await options.approvalHandler({
+                            sessionId: createdSessionId,
+                            turnId: currentTurnId,
+                            threadId: event.threadId || currentThreadId,
+                            toolCalls: event.toolCalls
+                        });
+                    }
+
+                    approvalDecision = decision;
+                    outputChannel.appendLine(`[Your +1 Approval Gate] Submitting decision: "${decision}" to TrueForge...`);
+
+                    if (currentTurnId) {
+                        for (const tc of event.toolCalls) {
+                            await client.sessions.createTurnEvent(createdSessionId, currentTurnId, {
+                                events: [
+                                    {
+                                        type: 'user.tool_approval',
+                                        toolCallId: tc.id,
+                                        threadId: event.threadId || currentThreadId || '',
+                                        approval: decision === 'allow'
+                                            ? { status: 'allow' }
+                                            : { status: 'deny', reason: 'Developer rejected changes during hunk review.' }
+                                    }
+                                ]
+                            });
+                        }
                     }
                 } else if (event.type === 'tool.response') {
                     outputChannel.appendLine(`\n[Agent Event] Tool result returned to model (Tool Call ID: ${event.toolCallId})`);
@@ -603,7 +664,10 @@ export class TrueForgeService {
                 model: selectedModel,
                 finalResponse: trimmed,
                 sessionId: createdSessionId,
-                toolCallsDetected: capturedCalls.map((c) => ({ tool: c.tool, arguments: c.arguments }))
+                toolCallsDetected: capturedCalls.map((c) => ({ tool: c.tool, arguments: c.arguments })),
+                proposal: mcpService.proposalStore.activeProposal,
+                approvalRequested,
+                approvalDecision
             };
         } catch (err: unknown) {
             const errorMsg = this._formatError(err, resolvedUrl);
@@ -612,7 +676,9 @@ export class TrueForgeService {
                 success: false,
                 error: errorMsg,
                 toolCallsDetected: [...mcpService.toolCalls].map((c) => ({ tool: c.tool, arguments: c.arguments })),
-                sessionId: createdSessionId
+                sessionId: createdSessionId,
+                approvalRequested,
+                approvalDecision
             };
         } finally {
             if (createdSessionId) {
