@@ -73,3 +73,4 @@ export class StagedContentProvider implements vscode.TextDocumentContentProvider
         });
     }
 }
+

@@ -7,7 +7,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 import { ProposalStore } from './diff/ProposalStore.js';
-import type { ModificationProposal } from './diff/DiffTypes.js';
+import type { ModificationProposal, WorkspaceBatchWriter } from './diff/DiffTypes.js';
 
 export interface McpServerConfig {
     workspaceRoot: string;
@@ -17,6 +17,7 @@ export interface McpServerConfig {
     maxFileSize?: number;
     logger?: (message: string) => void;
     proposalStore?: ProposalStore;
+    writer?: WorkspaceBatchWriter;
     onProposalCreated?: (proposal: ModificationProposal) => void;
 }
 
@@ -94,7 +95,7 @@ export class McpServerService {
         this._authToken = config.authToken ?? crypto.randomBytes(32).toString('hex');
         this._maxFileSize = config.maxFileSize ?? DEFAULT_MAX_FILE_SIZE;
         this._logger = config.logger;
-        this._proposalStore = config.proposalStore ?? new ProposalStore(this._workspaceRoot);
+        this._proposalStore = config.proposalStore ?? new ProposalStore(this._workspaceRoot, config.writer);
         this._onProposalCreated = config.onProposalCreated;
     }
 

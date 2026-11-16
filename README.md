@@ -2,7 +2,7 @@
 
 **Your +1** is an autonomous AI engineering companion for Visual Studio Code, designed to pair program with developers, provide architectural insights, and streamline coding workflows.
 
-This repository represents **Milestone 4: Safe Workspace Editing and Hunk-Level Diff Review**, featuring safe in-memory modification proposals, native VS Code diff review (`yourplusone-staged:`), granular hunk-by-hunk acceptance/rejection, TrueForge tool approval integration, atomic workspace application, and one-click undo transactions.
+This repository represents **Milestone 4 & 4.1: Safe Workspace Editing, Hunk-Level Diff Review & Safety Hardening**, featuring safe in-memory modification proposals, native VS Code diff review (`yourplusone-staged:`), granular hunk-by-hunk acceptance/rejection, TrueForge tool approval integration, atomic workspace application via multi-file `WorkspaceEdit`, canonical symlink escape protection, conflict-aware undo, and memory-safe diffing.
 
 ---
 
@@ -12,8 +12,24 @@ This repository represents **Milestone 4: Safe Workspace Editing and Hunk-Level 
 - **Interactive Sidebar & Review UI**: A native-styled webview introducing Your +1, its mission, live status, Context Selection panel, and the **Hunk-Level Diff Review & Staging** controls.
 - **Safe In-Memory Staging & Zero Silent Writes**:
   - Code changes proposed by the AI or user are staged strictly in-memory (`ModificationProposal` / `FileProposal`).
-  - Absolute traversal prevention (`..`), sensitive path filtering (`.env`, `*.pem`, `.git`), and binary file rejection.
+  - Absolute traversal prevention (`..`), sensitive path filtering (`.env`, `*.pem`, `.git`, `.github/workflows/`), and binary null-byte rejection.
   - Zero disk writes take place until explicitly accepted and confirmed.
+- **Production Safe Batch Writer (Milestone 4.1)**:
+  - Both MCP tool execution (`apply_proposal`) and extension commands use the exact same atomic VS Code `WorkspaceEdit` batch writer (`createSafeVsCodeWorkspaceWriter`).
+  - Direct sequential filesystem write fallbacks (`fs.writeFileSync`) are strictly forbidden in production.
+  - Handles open and dirty VS Code documents safely and verifies resulting disk contents immediately following application.
+- **Canonical Symlink Escape Protection (Milestone 4.1)**:
+  - Canonicalizes the authorized workspace root using `fs.realpathSync.native`.
+  - Inspects every path component and rejects symbolic links and Windows junctions that point outside the authorized root.
+  - Revalidates paths immediately prior to writing to catch symlinks retargeted while a proposal was awaiting review.
+- **Conflict-Aware Undo Manager (Milestone 4.1)**:
+  - Stores SHA-256 post-apply hashes in immutable `TransactionRecord`s.
+  - Before restoring previous content, verifies that no subsequent developer edits were made to any affected files. If a file was changed on disk after the transaction, undo aborts to protect user changes.
+  - Applies restorations through the atomic workspace batch writer.
+- **Memory-Safe Diff Engine (Milestone 4.1)**:
+  - Optimizes diffing by stripping common prefix and suffix lines before computing the dynamic programming matrix.
+  - Uses flat `Int32Array` buffers (4 bytes/cell) instead of nested arrays to minimize heap allocations.
+  - Enforces safe input and matrix thresholds (`MAX_DIFF_INPUT_LINES = 20,000`, `MAX_DIFF_MATRIX_CELLS = 2,500,000`), raising a descriptive `DiffSizeExceededError` to protect the extension host against memory exhaustion.
 - **Virtual Staging & Native Diff Editor**:
   - `StagedContentProvider` serves proposed content under the virtual `yourplusone-staged:` URI scheme.
   - Opens native VS Code diff editors (`vscode.diff`) side-by-side comparing the live workspace file against the proposed staged version.
@@ -23,13 +39,7 @@ This repository represents **Milestone 4: Safe Workspace Editing and Hunk-Level 
   - Non-contiguous and mixed hunk decisions are accurately recombined (`applyHunkDecisions`), applying only accepted hunks while leaving rejected hunks untouched.
 - **TrueForge Tool Approval Integration**:
   - `apply_proposal` is strictly protected by TrueForge's `require_approval_for_tools` policy.
-  - TrueForge pauses execution upon `tool.approval_required` and awaits developer confirmation via `user.tool_approval` turn events (`allow` or `deny`).
-- **Atomic Modification & Conflict Detection**:
-  - File modifications are applied atomically via `vscode.workspace.applyEdit`.
-  - Content SHA-256 hashes are verified immediately prior to writing; if a file has been modified externally since proposal staging, a concurrency conflict is raised to prevent overwriting developer changes.
-- **One-Click Undo Manager**:
-  - Every applied proposal generates an immutable `TransactionRecord` storing original file contents.
-  - Developers can instantly revert any transaction with a single click (`yourplusone.undoLastTransaction`).
+  - TrueForge pauses execution upon `tool.approval_required` and maps the request to the staged proposal and tool call before awaiting developer confirmation via `user.tool_approval` turn events (`allow` or `deny`).
 - **Explicit Context References (`@file`, `@symbol`)**:
   - `@file path/to/file.ts`: Resolves workspace-relative paths, enforces traversal protection, rejects sensitive files and binaries.
   - `@symbol SymbolName`: Resolves definitions of functions, classes, interfaces, and variables. Intelligently disambiguates duplicate symbols across files, prioritizing core source implementations over test mocks.
@@ -38,7 +48,6 @@ This repository represents **Milestone 4: Safe Workspace Editing and Hunk-Level 
   - Enforces bounded token budgets (configurable via `yourplusone.maxContextBudgetTokens`, default 16,000 tokens).
   - Uses a transparent, documented token estimation heuristic (~4 chars/token).
   - Strictly prioritizes explicit references over automatic candidates.
-- **TrueForge SDK & MCP Integration**: Dispatches assembled context directly to TrueForge agent turns while keeping both read-only workspace tools (`search_workspace`, `read_file`) and staging tools (`propose_file_modification`, `apply_proposal`) active.
 - **Commands**:
   - `yourplusone.openWelcome`: Reveals sidebar view.
   - `yourplusone.testConnection`: Verifies runtime reachability and streams PONG response.
@@ -68,20 +77,20 @@ Your-Plus-One/
 │   │   │   ├── ContextBudgetManager.ts    # Token budget allocation & truncation
 │   │   │   └── ContextAssemblyEngine.ts   # Central context assembly orchestrator
 │   │   ├── diff/
-│   │   │   ├── DiffTypes.ts               # Hunk, Proposal, Decision & Transaction types
-│   │   │   ├── HunkEngine.ts              # LCS line diff, hunk grouping, mixed hunk combiner
-│   │   │   ├── ProposalStore.ts           # In-memory proposal staging, conflict checks & undo
+│   │   │   ├── DiffTypes.ts               # Hunk, Proposal, Decision, BatchWriter & Transaction types
+│   │   │   ├── HunkEngine.ts              # LCS diff, common prefix/suffix, Int32Array & memory limits
+│   │   │   ├── ProposalStore.ts           # In-memory staging, symlink validation, conflict checks & undo
 │   │   │   └── StagedContentProvider.ts   # yourplusone-staged: TextDocumentContentProvider & diff launcher
-│   │   ├── McpServerService.ts            # Embedded Streamable HTTP MCP server (read & write tools)
-│   │   └── TrueForgeService.ts            # TrueForge SDK communication, approval events & streaming
+│   │   ├── McpServerService.ts            # Embedded Streamable HTTP MCP server (safe batch writer integrated)
+│   │   └── TrueForgeService.ts            # TrueForge SDK communication, approval events & tool mapping
 │   ├── views/
 │   │   └── WelcomeViewProvider.ts         # Sidebar WebviewViewProvider, Context UI & Diff Review UI
 │   ├── test/
 │   │   ├── extension.test.ts              # Scaffolding & command registration tests
 │   │   ├── mcp.test.ts                    # MCP security & tool bridge tests
 │   │   ├── context.test.ts                # Context assembly, budgeting & symbol tests
-│   │   └── diff.test.ts                   # Diff engine, staging, approval & undo tests
-│   └── extension.ts                       # Main extension entrypoint, commands & provider registration
+│   │   └── diff.test.ts                   # Diff engine, symlinks, undo conflicts, batch writer & approval tests
+│   └── extension.ts                       # Main extension entrypoint, commands, safe batch writer & activation
 ├── esbuild.js             # esbuild configuration
 ├── package.json           # Extension manifest
 ├── tsconfig.json          # Strict TypeScript configuration
@@ -150,15 +159,7 @@ The extension contributes the following VS Code settings under `yourplusone.*`:
 
 ## How to Test Manually
 
-### 1. Test the Activity Bar Container & Sidebar View
-1. In the **[Extension Development Host]** window, find the **Your +1** (`+1`) icon on the Activity Bar (left sidebar).
-2. Click the icon to expand the **Your +1** sidebar.
-3. Verify that the welcome view renders with:
-   - Header: "Your +1" and "Your AI Engineering Companion".
-   - Status badge indicating active foundation.
-   - Interactive sections: Connection status, Context Assembly, and Hunk-Level Diff Review.
-
-### 2. Test Safe Workspace Editing & Hunk Review
+### 1. Test Safe Workspace Editing & Hunk Review
 1. In the sidebar view, click **Stage Sample Proposal**.
 2. Observe:
    - A multi-file proposal is created in-memory and rendered in the **Hunk-Level Diff Review & Staging** card.
@@ -169,7 +170,7 @@ The extension contributes the following VS Code settings under `yourplusone.*`:
 4. Test Selective Hunk Decisions:
    - Click **Reject Hunk** on one of the hunks and **Accept Hunk** on another.
    - Click **Confirm & Apply Accepted Hunks** (or run `Your +1: Apply Accepted Hunks` from Command Palette).
-   - Inspect the disk file: only the accepted hunk changes are written to the workspace; the rejected hunk remains as original.
-5. Test One-Click Undo:
+   - Inspect the disk file: only the accepted hunk changes are written to the workspace via `vscode.workspace.applyEdit`; the rejected hunk remains as original.
+5. Test Conflict-Aware Undo:
    - Click **Undo Last Transaction** (or run `Your +1: Undo Last Workspace Transaction`).
-   - The original workspace files are restored atomically, and the transaction is cleared.
+   - The original workspace files are restored atomically. If any file has been modified externally after the transaction, undo detects the conflict and refuses to overwrite developer changes.

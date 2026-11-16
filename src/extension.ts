@@ -1,11 +1,57 @@
 import * as vscode from 'vscode';
-import * as path from 'node:path';
 import { WelcomeViewProvider } from './views/WelcomeViewProvider.js';
 import { TrueForgeService } from './services/TrueForgeService.js';
 import { ContextAssemblyEngine } from './services/context/ContextAssemblyEngine.js';
 import type { ActiveEditorContext } from './services/context/ContextTypes.js';
 import { ProposalStore } from './services/diff/ProposalStore.js';
 import { StagedContentProvider } from './services/diff/StagedContentProvider.js';
+import type { WorkspaceBatchWriter, WorkspaceBatchWriteItem, WorkspaceBatchWriterResult } from './services/diff/DiffTypes.js';
+
+/**
+ * Factory for creating the production VS Code atomic multi-file WorkspaceEdit batch writer.
+ * Handles open/dirty documents safely and guarantees atomicity across all proposal files.
+ */
+export function createSafeVsCodeWorkspaceWriter(): WorkspaceBatchWriter {
+    return async (items: WorkspaceBatchWriteItem[]): Promise<WorkspaceBatchWriterResult> => {
+        if (items.length === 0) {
+            return { success: true, writtenFiles: [] };
+        }
+
+        const workspaceEdit = new vscode.WorkspaceEdit();
+        const openedDocs: Array<{ doc: vscode.TextDocument; uri: vscode.Uri; relPath: string }> = [];
+
+        // 1. Build and validate edits for all files in the batch
+        for (const item of items) {
+            const uri = vscode.Uri.file(item.absPath);
+            const doc = await vscode.workspace.openTextDocument(uri);
+            openedDocs.push({ doc, uri, relPath: item.filePath });
+
+            const fullRange = new vscode.Range(
+                doc.positionAt(0),
+                doc.positionAt(doc.getText().length)
+            );
+            workspaceEdit.replace(uri, fullRange, item.content);
+        }
+
+        // 2. Apply multi-file WorkspaceEdit atomically
+        const applied = await vscode.workspace.applyEdit(workspaceEdit);
+        if (!applied) {
+            throw new Error(`Failed to apply atomic WorkspaceEdit across ${items.length} file(s).`);
+        }
+
+        // 3. Save all affected documents to disk
+        const writtenFiles: string[] = [];
+        for (const { doc, relPath } of openedDocs) {
+            const saved = await doc.save();
+            if (!saved) {
+                throw new Error(`Failed to save document to disk after WorkspaceEdit: "${relPath}".`);
+            }
+            writtenFiles.push(relPath);
+        }
+
+        return { success: true, writtenFiles };
+    };
+}
 
 /**
  * Activates the Your +1 extension.
@@ -20,8 +66,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
 
-    // 1. Initialize safe diff and staging subsystems
-    const proposalStore = new ProposalStore(workspaceFolder);
+    // 1. Initialize safe diff and staging subsystems with atomic workspace batch writer
+    const safeWorkspaceWriter = createSafeVsCodeWorkspaceWriter();
+    const proposalStore = new ProposalStore(workspaceFolder, safeWorkspaceWriter);
     const stagedContentProvider = new StagedContentProvider(proposalStore, workspaceFolder);
 
     const providerRegistration = vscode.workspace.registerTextDocumentContentProvider(
@@ -271,26 +318,6 @@ export function activate(context: vscode.ExtensionContext): void {
         }
     );
 
-    // Helper for applying changes using native VS Code WorkspaceEdit
-    const applyWorkspaceEditSafely = async (relPath: string, content: string): Promise<void> => {
-        const fullUri = vscode.Uri.file(path.resolve(workspaceFolder, relPath));
-        const edit = new vscode.WorkspaceEdit();
-
-        // Read full document range if open
-        const doc = await vscode.workspace.openTextDocument(fullUri);
-        const fullRange = new vscode.Range(
-            doc.positionAt(0),
-            doc.positionAt(doc.getText().length)
-        );
-
-        edit.replace(fullUri, fullRange, content);
-        const applied = await vscode.workspace.applyEdit(edit);
-        if (!applied) {
-            throw new Error(`Failed to apply WorkspaceEdit to ${relPath}`);
-        }
-        await doc.save();
-    };
-
     // Register Apply Accepted Hunks command
     const applyAcceptedHunksCommand = vscode.commands.registerCommand(
         'yourplusone.applyAcceptedHunks',
@@ -302,7 +329,7 @@ export function activate(context: vscode.ExtensionContext): void {
             }
 
             try {
-                const tx = await proposalStore.applyProposal(proposalId, applyWorkspaceEditSafely);
+                const tx = await proposalStore.applyProposal(proposalId);
                 const prop = proposalStore.getProposal(proposalId);
                 if (prop) {
                     welcomeViewProvider.updateProposal(prop);
@@ -324,7 +351,7 @@ export function activate(context: vscode.ExtensionContext): void {
         'yourplusone.undoLastTransaction',
         async () => {
             try {
-                const result = await proposalStore.undoTransaction(undefined, applyWorkspaceEditSafely);
+                const result = await proposalStore.undoTransaction();
                 if (proposalStore.activeProposal) {
                     welcomeViewProvider.updateProposal(proposalStore.activeProposal);
                 }
@@ -383,14 +410,16 @@ export function activate(context: vscode.ExtensionContext): void {
                 const result = await service.runTurnWithContext(workspaceFolder, assembled, outputChannel, {
                     proposalStore,
                     approvalHandler: async (req) => {
-                        const activeProp = proposalStore.activeProposal;
-                        if (activeProp) {
-                            welcomeViewProvider.updateProposal(activeProp);
+                        const targetProp = req.proposal ?? proposalStore.activeProposal;
+                        if (targetProp) {
+                            welcomeViewProvider.updateProposal(targetProp);
                             welcomeViewProvider.focus();
                         }
 
+                        const propId = targetProp?.id ?? req.proposalId ?? 'pending';
+                        const fileCount = targetProp?.files.length ?? req.toolCalls.length;
                         const choice = await vscode.window.showInformationMessage(
-                            `Your +1: TrueForge has proposed changes awaiting approval for ${req.toolCalls.length} action(s). Review hunks in the sidebar or diff editor.`,
+                            `Your +1: TrueForge has requested approval for proposal "${propId}" (${fileCount} file(s)). Review hunks in the sidebar or diff editor.`,
                             { modal: true },
                             'Allow & Apply Accepted Hunks',
                             'Reject Proposal'

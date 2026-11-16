@@ -37,7 +37,9 @@ export interface RunContextTurnOptions {
         sessionId: string;
         turnId: string;
         threadId?: string;
-        toolCalls: Array<{ id: string; sourceEventId?: string }>;
+        toolCalls: Array<{ id: string; sourceEventId?: string; name?: string; arguments?: Record<string, unknown> }>;
+        proposalId?: string;
+        proposal?: ModificationProposal;
     }) => Promise<'allow' | 'deny'>;
 }
 
@@ -602,6 +604,8 @@ export class TrueForgeService {
             });
 
             let fullContent = '';
+            const pendingToolCalls = new Map<string, { id: string; name: string; arguments?: Record<string, unknown> }>();
+
             for await (const event of stream) {
                 if (event.type === 'turn.created') {
                     currentTurnId = event.turnId;
@@ -613,11 +617,40 @@ export class TrueForgeService {
                     outputChannel.append(event.content);
                 } else if (event.type === 'model.message' && event.toolCalls && event.toolCalls.length > 0) {
                     for (const tc of event.toolCalls) {
+                        pendingToolCalls.set(tc.id, tc);
                         outputChannel.appendLine(`\n[Agent Event] Model requested tool "${tc.name}" with arguments: ${JSON.stringify(tc.arguments)}`);
                     }
                 } else if (event.type === 'tool.approval_required') {
                     approvalRequested = true;
                     outputChannel.appendLine(`\n[Your +1 Approval Gate] Tool approval required by TrueForge for ${event.toolCalls.length} tool call(s).`);
+
+                    // Map tool approval requests to concrete tool calls and staged proposals
+                    let targetProposalId: string | undefined;
+                    let targetProposal: ModificationProposal | undefined;
+                    const enrichedToolCalls = event.toolCalls.map((tc: any) => {
+                        const matched = pendingToolCalls.get(tc.id);
+                        if (matched?.name === 'apply_proposal' && typeof matched.arguments?.proposalId === 'string') {
+                            targetProposalId = matched.arguments.proposalId;
+                        }
+                        return {
+                            id: tc.id,
+                            sourceEventId: tc.sourceEventId,
+                            name: matched?.name,
+                            arguments: matched?.arguments
+                        };
+                    });
+
+                    if (targetProposalId && options?.proposalStore) {
+                        targetProposal = options.proposalStore.getProposal(targetProposalId);
+                        if (targetProposal) {
+                            targetProposal.toolCallId = event.toolCalls[0]?.id;
+                            targetProposal.threadId = event.threadId || currentThreadId;
+                            targetProposal.turnId = currentTurnId;
+                            targetProposal.sessionId = createdSessionId;
+                        } else {
+                            outputChannel.appendLine(`[Your +1 Approval Gate] Warning: Approval requested for unknown proposal ID: "${targetProposalId}".`);
+                        }
+                    }
 
                     let decision: 'allow' | 'deny' = 'deny';
                     if (options?.approvalHandler && currentTurnId) {
@@ -625,8 +658,14 @@ export class TrueForgeService {
                             sessionId: createdSessionId,
                             turnId: currentTurnId,
                             threadId: event.threadId || currentThreadId,
-                            toolCalls: event.toolCalls
+                            toolCalls: enrichedToolCalls,
+                            proposalId: targetProposalId,
+                            proposal: targetProposal
                         });
+                    }
+
+                    if (decision === 'deny' && targetProposal) {
+                        targetProposal.status = 'rejected';
                     }
 
                     approvalDecision = decision;
