@@ -2,21 +2,31 @@
 
 **Your +1** is an autonomous AI engineering companion for Visual Studio Code, designed to pair program with developers, provide architectural insights, and streamline coding workflows.
 
-This repository represents **Milestone 2: Read-only MCP Bridge**, establishing an embedded Model Context Protocol (MCP) server inside the Extension Host, exposing read-only workspace tools (`search_workspace` and `read_file`), and proving autonomous tool discovery and execution via the TrueForge agent runtime.
+This repository represents **Milestone 3: Context Assembly Engine**, featuring an intelligent, explainable context assembly pipeline with explicit `@file` and `@symbol` parsing, automatic semantic keyword retrieval, bounded token budgeting, and an explainable selection webview UI.
 
 ---
 
 ## Features
 
 - **Native Activity Bar Container**: Custom `+1` icon integrated into the VS Code Activity Bar.
-- **Interactive Sidebar Welcome View**: A native-styled webview introducing Your +1, its mission, and its active status.
-- **"Your +1: Open Welcome" Command**: Command palette entry (`yourplusone.openWelcome`) that reveals the sidebar view and displays a welcome notification.
-- **TrueForge SDK Integration**: Connects to a local TrueForge instance via the official TypeScript SDK (`@truefoundry/trueforge-sdk`).
-- **"Your +1: Test TrueForge Connection" Command**: Command palette entry (`yourplusone.testConnection`) and sidebar button that queries runtime models, creates a temporary session, streams a verification turn ("Reply with exactly: PONG") into a dedicated Output Channel, and cleans up the session.
-- **Embedded Read-only MCP Bridge**: Local Streamable HTTP MCP server running inside the Extension Host on loopback (`127.0.0.1`) with per-session bearer authentication exposing:
-  - `search_workspace`: Fast text query search across workspace files with directory exclusions and bounded results.
-  - `read_file`: Safe workspace-relative text reading with traversal protection, sensitive file rejection, binary file filtering, and size limit enforcement (<256 KB).
-- **"Your +1: Run MCP Bridge Proof" Command**: Command palette entry (`yourplusone.runMcpProof`) and sidebar button that registers the MCP server with TrueForge, attaches it to an inline agent session, directs the model to autonomously locate marker files and inspect contents, and cleans up all resources.
+- **Interactive Sidebar & Explainable Context UI**: A native-styled webview introducing Your +1, its mission, live status, and an interactive Context Selection panel.
+- **Explicit Context References (`@file`, `@symbol`)**:
+  - `@file path/to/file.ts`: Resolves workspace-relative paths, enforces traversal protection (`..`), rejects sensitive files (`.env`, `.pem`) and binaries.
+  - `@symbol SymbolName`: Resolves definitions of functions, classes, interfaces, and variables. Intelligently disambiguates duplicate symbols across files, prioritizing core source implementations over test mocks and documenting rationale.
+- **Automatic Semantic Context Retrieval**: Discovers relevant files and contiguous code excerpts based on task terminology, keyword density, and active editor context without needing explicit mentions.
+- **Transparent Context Budgeting**:
+  - Enforces bounded token budgets (configurable via `yourplusone.maxContextBudgetTokens`, default 16,000 tokens).
+  - Uses a transparent, documented token estimation heuristic (~4 chars/token).
+  - Strictly prioritizes explicit references over automatic candidates.
+  - Gracefully truncates or omits lower-relevance automatic excerpts when the budget is reached.
+- **Explainable Selection Rationale**: Displays file paths, symbol names, retrieval sources, selection reasons, excerpt line ranges, token counts, and inclusion statuses.
+- **TrueForge SDK & MCP Integration**: Dispatches assembled context directly to TrueForge agent turns while keeping read-only workspace tools (`search_workspace`, `read_file`) active.
+- **Commands**:
+  - `yourplusone.openWelcome`: Reveals sidebar view.
+  - `yourplusone.testConnection`: Verifies runtime reachability and streams PONG response.
+  - `yourplusone.runMcpProof`: Exercises embedded MCP server with TrueForge autonomous tool discovery.
+  - `yourplusone.assembleContext`: Interactively assembles explainable context for any developer task.
+  - `yourplusone.runTurnWithContext`: Executes an end-to-end TrueForge agent turn with assembled context.
 - **Modular TypeScript Architecture**: Built with strict TypeScript compiler checks and fast esbuild bundling.
 
 ---
@@ -27,15 +37,25 @@ This repository represents **Milestone 2: Read-only MCP Bridge**, establishing a
 Your-Plus-One/
 ├── .vscode/               # VS Code launch and task configurations
 ├── dist/                  # Bundled extension output (esbuild)
-├── resources/             # Extension assets (Activity Bar icon)
+├── resources/             # Extension assets (Activity Bar icon, test fixtures)
 ├── src/
 │   ├── services/
-│   │   └── TrueForgeService.ts      # TrueForge SDK communication & streaming
+│   │   ├── context/
+│   │   │   ├── ContextTypes.ts            # Type definitions for candidates & budget
+│   │   │   ├── FileResolver.ts            # @file reference resolution & security checks
+│   │   │   ├── SymbolResolver.ts          # @symbol definition resolution & disambiguation
+│   │   │   ├── AutomaticRetriever.ts      # Task keyword extraction & excerpt scoring
+│   │   │   ├── ContextBudgetManager.ts    # Token budget allocation & truncation
+│   │   │   └── ContextAssemblyEngine.ts   # Central context assembly orchestrator
+│   │   ├── McpServerService.ts            # Embedded Streamable HTTP MCP server
+│   │   └── TrueForgeService.ts            # TrueForge SDK communication & streaming
 │   ├── views/
-│   │   └── WelcomeViewProvider.ts   # Sidebar WebviewViewProvider
+│   │   └── WelcomeViewProvider.ts         # Sidebar WebviewViewProvider & Context UI
 │   ├── test/
-│   │   └── extension.test.ts        # Integration test suite
-│   └── extension.ts                 # Main extension entrypoint & activation
+│   │   ├── extension.test.ts              # Scaffolding & command registration tests
+│   │   ├── mcp.test.ts                    # MCP security & tool bridge tests
+│   │   └── context.test.ts                # Context assembly, budgeting & symbol tests
+│   └── extension.ts                       # Main extension entrypoint & activation
 ├── esbuild.js             # esbuild configuration
 ├── package.json           # Extension manifest
 ├── tsconfig.json          # Strict TypeScript configuration
@@ -53,6 +73,7 @@ The extension contributes the following VS Code settings under `yourplusone.*`:
 | `yourplusone.runtimeUrl` | string | `http://127.0.0.1:8790` | Base URL of the local or remote TrueForge runtime server |
 | `yourplusone.apiToken` | string | `trueforge-standalone` | API authentication token or secret for the TrueForge runtime |
 | `yourplusone.model` | string | `""` (auto-detected) | Default model to use (falls back to runtime-configured default) |
+| `yourplusone.maxContextBudgetTokens` | integer | `16000` | Maximum token budget allocated for assembled context |
 
 ---
 

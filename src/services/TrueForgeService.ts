@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { McpServerService } from './McpServerService.js';
+import type { AssembledContextResult } from './context/ContextTypes.js';
 
 export interface TrueForgeConfig {
     runtimeUrl: string;
@@ -24,6 +25,15 @@ export interface TestMcpBridgeResult {
     toolsDiscovered: string[];
     sessionId?: string;
     mcpServerUrl?: string;
+    error?: string;
+}
+
+export interface RunContextTurnResult {
+    success: boolean;
+    model?: string;
+    finalResponse?: string;
+    sessionId?: string;
+    toolCallsDetected: Array<{ tool: string; arguments: Record<string, unknown> }>;
     error?: string;
 }
 
@@ -426,6 +436,205 @@ export class TrueForgeService {
                 await mcpService.stop();
             } catch (stopErr: unknown) {
                 outputChannel.appendLine(`[Your +1] Warning stopping MCP service: ${stopErr instanceof Error ? stopErr.message : String(stopErr)}`);
+            }
+        }
+    }
+
+    /**
+     * Retrieves model context length and max output token capabilities from TrueForge if reachable.
+     */
+    public async getModelMetadata(): Promise<{ contextLength?: number; maxOutputTokens?: number; modelName?: string }> {
+        try {
+            const TrueForgeClientClass = await this._getClientConstructor();
+            const client = new TrueForgeClientClass({
+                baseUrl: this._config.runtimeUrl,
+                token: this._config.apiToken,
+                timeoutInSeconds: 5
+            });
+
+            const modelsRes = await client.models.list();
+            const models = modelsRes.data ?? [];
+            const targetModel = this._config.model
+                ? models.find((m: any) => m.name === this._config.model)
+                : models[0];
+
+            if (targetModel?.properties) {
+                return {
+                    contextLength: targetModel.properties.contextLength,
+                    maxOutputTokens: targetModel.properties.maxOutputTokens,
+                    modelName: targetModel.name
+                };
+            }
+        } catch {
+            // Server offline or unavailable
+        }
+
+        return {};
+    }
+
+    /**
+     * Executes a TrueForge agent turn equipped with assembled workspace context and active MCP tools.
+     */
+    public async runTurnWithContext(
+        workspaceRoot: string,
+        assembledContext: AssembledContextResult,
+        outputChannel: vscode.OutputChannel
+    ): Promise<RunContextTurnResult> {
+        outputChannel.appendLine(`========================================================`);
+        outputChannel.appendLine(`[Your +1] Dispatching Agent Turn with Assembled Context`);
+        outputChannel.appendLine(`[Your +1] Task: "${assembledContext.originalPrompt}"`);
+        outputChannel.appendLine(`[Your +1] Included Candidates: ${assembledContext.candidates.filter(c => c.status === 'included' || c.status === 'truncated').length}`);
+        outputChannel.appendLine(`[Your +1] Context Tokens: ${assembledContext.budget.usedTokens} / ${assembledContext.budget.maxContextAssemblyBudget}`);
+        outputChannel.appendLine(`========================================================`);
+
+        let resolvedUrl = this._config.runtimeUrl;
+        try {
+            resolvedUrl = await this.resolveBaseUrl(this._config.runtimeUrl, outputChannel);
+        } catch {
+            // fallback
+        }
+
+        const TrueForgeClientClass = await this._getClientConstructor();
+        const client = new TrueForgeClientClass({
+            baseUrl: resolvedUrl,
+            token: this._config.apiToken,
+            timeoutInSeconds: this._config.timeoutInSeconds ?? 60
+        });
+
+        const mcpServerName = 'yourplusone-tools';
+        let createdSessionId: string | undefined;
+        let mcpRegistered = false;
+
+        const mcpService = new McpServerService({
+            workspaceRoot,
+            logger: (msg) => outputChannel.appendLine(`[MCP Log] ${msg}`)
+        });
+
+        try {
+            const serverInfo = await mcpService.start();
+            outputChannel.appendLine(`[Your +1] Local MCP Server running on: ${serverInfo.url}`);
+
+            await client.settings.mcpServers.createOrUpdate({
+                manifest: {
+                    type: 'remote',
+                    name: mcpServerName,
+                    url: serverInfo.url,
+                    description: 'Your +1 workspace tools (search_workspace, read_file)',
+                    auth: {
+                        type: 'header',
+                        headers: {
+                            Authorization: `Bearer ${serverInfo.authToken}`
+                        }
+                    }
+                }
+            });
+            mcpRegistered = true;
+
+            // Resolve model
+            const modelsRes = await client.models.list();
+            const availableModels = modelsRes.data ?? [];
+            let selectedModel = this._config.model;
+            if (!selectedModel || !availableModels.some((m: any) => m.name === selectedModel)) {
+                selectedModel = availableModels[0]?.name ?? 'google-gemini/gemini-3-1-flash-lite';
+            }
+            outputChannel.appendLine(`[Your +1] Model selected: ${selectedModel}`);
+
+            // Create agent session with assembled context instructions and MCP tools attached
+            const sessionRes = await client.sessions.create({
+                agent: {
+                    spec: {
+                        model: { name: selectedModel },
+                        instructions: 'You are Your +1, an AI engineering companion. You are provided with assembled workspace context containing explicit file references and relevant excerpts. Use this context carefully. You also have access to search_workspace and read_file tools if you need to inspect additional files or verify details.',
+                        mcp_servers: [
+                            {
+                                name: mcpServerName,
+                                enable_tools: ['search_workspace', 'read_file'],
+                                preload: true,
+                                preload_tools: ['search_workspace', 'read_file'],
+                                require_approval_for_tools: []
+                            }
+                        ]
+                    }
+                }
+            });
+
+            createdSessionId = sessionRes.data?.id;
+            if (!createdSessionId) {
+                throw new Error('TrueForge did not return a session ID.');
+            }
+            outputChannel.appendLine(`[Your +1] Session created: ${createdSessionId}`);
+
+            // Dispatch prompt with assembled context
+            const turnPayload = `${assembledContext.cleanedPrompt}\n\n${assembledContext.formattedContext}`;
+            outputChannel.appendLine(`[Your +1] Streaming turn execution...`);
+            outputChannel.appendLine(`---------------- [Stream Output Start] ----------------`);
+
+            const stream = await client.sessions.createTurnStream(createdSessionId, {
+                input: [
+                    {
+                        type: 'user.message',
+                        content: turnPayload
+                    }
+                ]
+            });
+
+            let fullContent = '';
+            for await (const event of stream) {
+                if (event.type === 'model.message.delta' && event.content) {
+                    fullContent += event.content;
+                    outputChannel.append(event.content);
+                } else if (event.type === 'model.message' && event.toolCalls && event.toolCalls.length > 0) {
+                    for (const tc of event.toolCalls) {
+                        outputChannel.appendLine(`\n[Agent Event] Model requested tool "${tc.name}" with arguments: ${JSON.stringify(tc.arguments)}`);
+                    }
+                } else if (event.type === 'tool.response') {
+                    outputChannel.appendLine(`\n[Agent Event] Tool result returned to model (Tool Call ID: ${event.toolCallId})`);
+                } else if (event.type === 'turn.done') {
+                    outputChannel.appendLine(`\n----------------- [Stream Output End] -----------------`);
+                    outputChannel.appendLine(`[Your +1] Turn completed with status: ${event.state.status}`);
+                }
+            }
+
+            const trimmed = fullContent.trim();
+            const capturedCalls = [...mcpService.toolCalls];
+
+            return {
+                success: true,
+                model: selectedModel,
+                finalResponse: trimmed,
+                sessionId: createdSessionId,
+                toolCallsDetected: capturedCalls.map((c) => ({ tool: c.tool, arguments: c.arguments }))
+            };
+        } catch (err: unknown) {
+            const errorMsg = this._formatError(err, resolvedUrl);
+            outputChannel.appendLine(`[Your +1] ERROR during context turn: ${errorMsg}`);
+            return {
+                success: false,
+                error: errorMsg,
+                toolCallsDetected: [...mcpService.toolCalls].map((c) => ({ tool: c.tool, arguments: c.arguments })),
+                sessionId: createdSessionId
+            };
+        } finally {
+            if (createdSessionId) {
+                try {
+                    await client.sessions.delete(createdSessionId);
+                    outputChannel.appendLine(`[Your +1] Cleaned up session: ${createdSessionId}`);
+                } catch {
+                    // ignore
+                }
+            }
+            if (mcpRegistered) {
+                try {
+                    await client.settings.mcpServers.delete(mcpServerName);
+                    outputChannel.appendLine(`[Your +1] Deregistered MCP server: ${mcpServerName}`);
+                } catch {
+                    // ignore
+                }
+            }
+            try {
+                await mcpService.stop();
+            } catch {
+                // ignore
             }
         }
     }

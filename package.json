@@ -15,7 +15,9 @@
     "onView:yourplusone.welcomeView",
     "onCommand:yourplusone.openWelcome",
     "onCommand:yourplusone.testConnection",
-    "onCommand:yourplusone.runMcpProof"
+    "onCommand:yourplusone.runMcpProof",
+    "onCommand:yourplusone.assembleContext",
+    "onCommand:yourplusone.runTurnWithContext"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -52,6 +54,16 @@
         "command": "yourplusone.runMcpProof",
         "title": "Run MCP Bridge Proof",
         "category": "Your +1"
+      },
+      {
+        "command": "yourplusone.assembleContext",
+        "title": "Assemble Context for Task",
+        "category": "Your +1"
+      },
+      {
+        "command": "yourplusone.runTurnWithContext",
+        "title": "Run Agent Turn with Context",
+        "category": "Your +1"
       }
     ],
     "configuration": {
@@ -71,6 +83,11 @@
           "type": "string",
           "default": "",
           "description": "Optional model override (e.g. google-gemini/gemini-3-1-flash-lite). If empty, the first model configured in TrueForge is used."
+        },
+        "yourplusone.maxContextBudgetTokens": {
+          "type": "integer",
+          "default": 16000,
+          "description": "Maximum token budget allocated for context assembly."
         }
       }
     }
